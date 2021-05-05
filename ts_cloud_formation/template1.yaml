@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ThoughtSpot cluster of 2 nodes. Account:ecas Env: dev '
+Parameters:
+  BaseAmi:
+    Default: ami-03c3a7e4263fd998c
+    Description: Base AMI
+    Type: String
+  CIDROpen22:
+    Default: 198.21.21.21/32
+    Description: Open access to SSH port
+    Type: String
+  CIDROpen80:
+    Default: 198.21.21.21/32
+    Description: Open access to 80 port
+    Type: String
+  Env:
+    Default: dev
+    Description: Environment name
+    Type: String
+  InstanceType:
+    Default: m4.large
+    Description: Instance Type
+    Type: String
+  KeyName:
+    Default: artem_key_pair
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: String
+  PermossionBoundary:
+    Default: arn:aws:iam::050080185289:policy/ECASBubbleOwnerPermissionBoundaries
+    Description: Permission Boundary for a role
+    Type: String
+  ScaleCapacity:
+    Default: '2'
+    Description: ASG Scale Capacity
+    Type: String
+  SubnetOne:
+    Default: subnet-01e590127906101d0
+    Description: Subnet one
+    Type: String
+  SubnetTwo:
+    Default: subnet-0cca34df40e28e3ed
+    Description: Subnet two
+    Type: String
+  VPCAvailabilityZone1:
+    Default: eu-central-1a
+    Description: availability zone for cluster
+    Type: String
+  VPCId:
+    Default: vpc-0fce500049c806813
+    Description: availability zone for cluster
+    Type: String
+  VolumeSize:
+    Default: '200'
+    Description: Additional volume size for EC instance
+    Type: String
+Resources:
+  TSAutoScalingGroup:
+    Properties:
+      DesiredCapacity: !Ref 'ScaleCapacity'
+      LaunchConfigurationName: !Ref 'TSLaunchConfiguration'
+      MaxSize: !Ref 'ScaleCapacity'
+      MinSize: !Ref 'ScaleCapacity'
+      PlacementGroup: !Ref 'TSPlacementGroup'
+      Tags:
+        - Key: Environment
+          PropagateAtLaunch: true
+          Value: !Ref 'Env'
+        - Key: Name
+          PropagateAtLaunch: true
+          Value: TS ThoughtSpot Cluster Node
+      TargetGroupARNs:
+        - !Ref 'TSThoughtSpotTargetGroupWeb'
+      VPCZoneIdentifier:
+        - !Ref 'SubnetOne'
+    Type: AWS::AutoScaling::AutoScalingGroup
+  TSInstanceProfile:
+    Properties:
+      Roles:
+        - !Ref 'TSThoughtSpotRole'
+    Type: AWS::IAM::InstanceProfile
+  TSLaunchConfiguration:
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeSize: !Ref 'VolumeSize'
+      IamInstanceProfile: !Ref 'TSInstanceProfile'
+      ImageId: !Ref 'BaseAmi'
+      InstanceType: !Ref 'InstanceType'
+      KeyName: !Ref 'KeyName'
+      SecurityGroups:
+        - !Ref 'TSSGThoughtSpot'
+        - !Ref 'TSSGThoughtSpotCluster'
+      UserData: !Base64 "#!/bin/bash\nyum update -y\n##amazon-ssm-agent\nyum install\
+        \ -y https://s3.region.amazonaws.com/amazon-ssm-region/latest/linux_amd64/amazon-ssm-agent.rpm\n\
+        systemctl enable amazon-ssm-agent\nsystemctl start amazon-ssm-agent\nsystemctl\
+        \ status amazon-ssm-agent\n\namazon-linux-extras install nginx1 vim -y\nchkconfig\
+        \ nginx on\nsystemctl start nginx\n\ndrive=`lsblk | grep 200 | awk '{print\
+        \ $1}'`\nmkfs -t xfs /dev/$drive\nmkdir -p /ts/distro\nmount /dev/$drive /ts\n\
+        mkdir /ts/distro\ncd /ts/distro\n\naws s3 cp s3://thoughspot-distro-roche-eu-central/distro/6.3.0.CU1.tar.gz\
+        \ /ts/distro/ts.tar.gz --sse aws:kms\naws s3 cp s3://thoughspot-distro-roche-eu-central/distro/6.3.0.CU1.tar.gz.MD5checksum\
+        \  /ts/distro/ts.tar.gz.MD5checksum --sse aws:kms"
+    Type: AWS::AutoScaling::LaunchConfiguration
+  TSListenersThoughtSpot:
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'TSThoughtSpotTargetGroupWeb'
+          Type: forward
+      LoadBalancerArn: !Ref 'TSThoughtSpotALB'
+      Port: '80'
+      Protocol: HTTP
+    Type: AWS::ElasticLoadBalancingV2::Listener
+  TSPlacementGroup:
+    Properties:
+      Strategy: cluster
+    Type: AWS::EC2::PlacementGroup
+  TSSGThoughtSpot:
+    Properties:
+      GroupDescription: Allow access to ThoughtSpot
+      SecurityGroupIngress:
+        - CidrIp: !Ref 'CIDROpen22'
+          FromPort: '22'
+          IpProtocol: tcp
+          ToPort: '22'
+      Tags:
+        - Key: Name
+          Value: TS-SGThoughtSpot
+        - Key: Environment
+          Value: !Ref 'Env'
+      VpcId: !Ref 'VPCId'
+    Type: AWS::EC2::SecurityGroup
+  TSSGThoughtSpotCluster:
+    Properties:
+      GroupDescription: ThoughtSpot Cluster connectivity
+      SecurityGroupIngress:
+        - FromPort: '22'
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref 'TSSGThoughtSpot'
+          ToPort: '22'
+        - FromPort: '80'
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref 'TSSGThoughtSpot'
+          ToPort: '80'
+        - CidrIp: !Ref 'CIDROpen80'
+          FromPort: '80'
+          IpProtocol: tcp
+          ToPort: '80'
+      Tags:
+        - Key: Name
+          Value: TS-SGThoughtSpot
+        - Key: Environment
+          Value: !Ref 'Env'
+      VpcId: !Ref 'VPCId'
+    Type: AWS::EC2::SecurityGroup
+  TSThoughtSpotALB:
+    Properties:
+      Name: TSThoughtSpotALB
+      Scheme: internal
+      SecurityGroups:
+        - !Ref 'TSSGThoughtSpotCluster'
+      SubnetMappings:
+        - SubnetId: !Ref 'SubnetOne'
+        - SubnetId: !Ref 'SubnetTwo'
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+  TSThoughtSpotRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Path: /
+      PermissionsBoundary: !Ref 'PermossionBoundary'
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Effect: Allow
+                Resource: arn:aws:s3:::thoughspot-distro-roche-eu-central/*
+              - Action:
+                  - kms:Decrypt
+                Effect: Allow
+                Resource: '*'
+            Version: '2012-10-17'
+          PolicyName: TSpolicyReadingS3
+    Type: AWS::IAM::Role
+  TSThoughtSpotTargetGroupWeb:
+    Properties:
+      HealthCheckIntervalSeconds: '30'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: '10'
+      HealthyThresholdCount: '4'
+      Matcher:
+        HttpCode: '200'
+      Name: TSTSWebTargetHTTP-valued-bear
+      Port: '80'
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: '3'
+      VpcId: !Ref 'VPCId'
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
